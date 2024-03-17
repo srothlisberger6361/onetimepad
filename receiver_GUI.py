@@ -56,3 +56,4 @@ def gather_inputs_and_decrypt():
         tk.messagebox.showerror("Error", str(e))
 
 if __name__ == "__main__":
+    gather_inputs_and_decrypt()

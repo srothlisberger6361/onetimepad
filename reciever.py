@@ -1,65 +1,87 @@
 import argparse
-import requests
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+from PIL import Image
+import os
 from stegano import lsb
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import hashlib
 
-def download_image_from_facebook(access_token, post_id, image_name):
-    graph = facebook.GraphAPI(access_token)
-    post = graph.get_object(post_id, fields='full_picture')
-    image_url = post['full_picture']
+def derive_aes_key(passphrase, key_length=32):
+    """Derive an AES key from the passphrase."""
+    return hashlib.sha256(passphrase.encode()).digest()[:key_length]
 
-    response = requests.get(image_url)
-    with open(image_name, 'wb') as image_file:
-        image_file.write(response.content)
+def aes_encrypt(data, key):
+    """Encrypt data using AES encryption."""
+    cipher = AES.new(key, AES.MODE_CBC)
+    ct_bytes = cipher.encrypt(pad(data, AES.block_size))
+    return cipher.iv + ct_bytes  # IV is prepended to ciphertext
 
-    print("Image downloaded successfully.")
+def one_time_pad_encrypt(message, key):
+    """Encrypt message using a one-time pad (XOR)."""
+    assert len(message) <= len(key), "Key must be at least as long as the message"
+    return bytes([m ^ k for m, k in zip(message, key)])
 
-def extract_file_from_image(image_with_embedded_file, output_filename):
-    # Hardcoded region coordinates
-    region = (100, 100, 200, 200)  # (x, y, width, height)
+def embed_data_into_image(data, image_path, output_image_path):
+    """Embed data (hex string) into an image."""
+    data_hex_str = data.hex()  # Convert binary data to hex string for embedding
+    secret_image = lsb.hide(image_path, data_hex_str)
+    secret_image.save(output_image_path)
+    print(f"Data embedded into {output_image_path}.")
 
-    # Extract file from image using LSB steganography
-    extracted_file = lsb.reveal(image_with_embedded_file, region=region)
-    with open(output_filename, 'wb') as file:
-        file.write(extracted_file)
+def send_email(subject, body, sender_email, receiver_email, password, attachment_filenames):
+    """Send an email with attachments."""
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+    
+    for filename in attachment_filenames:
+        with open(filename, 'rb') as attachment:
+            part = MIMEApplication(attachment.read(), Name=os.path.basename(filename))
+        part['Content-Disposition'] = f'attachment; filename="{os.path.basename(filename)}"'
+        msg.attach(part)
 
-    print("File extracted successfully from the image.")
-
-def decrypt_message(encrypted_filename, key_filename, output_filename):
-    with open(encrypted_filename, 'rb') as encrypted_file, \
-         open(key_filename, 'rb') as key_file, \
-         open(output_filename, 'wb') as decrypted_file:
-        
-        encrypted_data = encrypted_file.read()
-        key = key_file.read()
-
-        decrypted_message = bytearray()
-        for m, k in zip(encrypted_data, key):
-            decrypted_message.append(m ^ k)  # XOR operation
-        
-        decrypted_file.write(decrypted_message)
-
-    print("Message decrypted successfully.")
+    with smtplib.SMTP('smtp-mail.outlook.com', 587) as smtp:
+        smtp.starttls()
+        smtp.login(sender_email, password)
+        smtp.send_message(msg)
+    print("Email sent with attachments.")
 
 def main():
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Download image from Facebook, extract file, and decrypt message")
-    parser.add_argument("-p", "--post_id", help="Post ID on Facebook", required=True)
-    parser.add_argument("-i", "--image_name", help="Image name (with extension)", required=True)
+    parser = argparse.ArgumentParser(description="Encrypt data, embed it in images, and send via email")
+    parser.add_argument("-es", "--sender_email", required=True)
+    parser.add_argument("-ps", "--sender_password", required=True)
+    parser.add_argument("-er", "--receiver_email", required=True)
+    parser.add_argument("-m", "--message", required=True)
+    parser.add_argument("-p", "--passphrase", required=True, help="Passphrase for AES key derivation")
+    parser.add_argument("-ki", "--key_image", required=True, help="Image for embedding the AES-encrypted OTP key")
+    parser.add_argument("-mi", "--message_image", required=True, help="Image for embedding the OTP encrypted message")
     args = parser.parse_args()
 
-    access_token = "your_facebook_access_token"
-    post_id = args.post_id
-    image_name = args.image_name
-    output_filename = "extracted_file.bin"
-    encrypted_filename = "encrypted_message.bin"
-    key_filename = "one_time_pad_key.bin"
-    decrypted_output_filename = "decrypted_message.txt"
+    # Derive AES key from passphrase
+    aes_key = derive_aes_key(args.passphrase)
 
-    download_image_from_facebook(access_token, post_id, image_name)
-    extract_file_from_image(image_name, output_filename)
-    decrypt_message(encrypted_filename, key_filename, decrypted_output_filename)
+    # Generate OTP key (same length as message) and encrypt message with OTP
+    otp_key = os.urandom(len(args.message))
+    encrypted_message = one_time_pad_encrypt(args.message.encode(), otp_key)
 
-    print("Extraction and decryption complete.")
+    # Encrypt OTP key with AES
+    aes_encrypted_otp_key = aes_encrypt(otp_key, aes_key)
+
+    # Embed AES-encrypted OTP key in pic1.png and OTP-encrypted message in pic2.png
+    embed_data_into_image(aes_encrypted_otp_key, args.key_image, "pic1.png")
+    embed_data_into_image(encrypted_message, args.message_image, "pic2.png")
+    
+    # Send email with embedded images
+    email_subject = "Vacation Pics!"
+    email_body = ""
+    send_email(email_subject, email_body, args.sender_email, args.receiver_email, args.sender_password, ["pic1.png", "pic2.png"])
 
 if __name__ == "__main__":
     main()
+
